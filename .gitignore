@@ -1,0 +1,83 @@
+# OCR 파이프라인 결과 파일들
+ocr_results/
+crops/
+ocr_refined/
+layout_combined/
+corrections/
+final_outputs/
+
+# 입력 파일들 (용량 큰 PDF/이미지)
+pdf_in/*.pdf
+pdf_in/*.png
+pdf_in/*.jpg
+pdf_in/*.jpeg
+
+# Python 관련
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# 가상환경
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 로그 파일
+*.log
+logs/
+
+# 임시 파일
+*.tmp
+*.temp
+.DS_Store
+Thumbs.db
+
+# 모델 파일 (용량 큰 파일들)
+*.bin
+*.safetensors
+*.onnx
+*.h5
+*.pkl
+*.model
+
+# 캐시
+.cache/
+*.cache
+
+# 설정 파일 (민감한 정보 포함 가능)
+config.json
+secrets.json
+.env
+.env.local
+
+# 테스트 결과
+test_results/
+temp/
+*.Identifier
