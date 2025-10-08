@@ -243,11 +243,71 @@ def apply_preprocessing(image):
     scale_factor = 2.8
     new_size = (int(original_size[0] * scale_factor), int(original_size[1] * scale_factor))
     upscaled = sharpened.resize(new_size, Image.Resampling.LANCZOS)
-    
+
     # PIL을 OpenCV로 다시 변환
     upscaled_cv = cv2.cvtColor(np.array(upscaled), cv2.COLOR_RGB2BGR)
-    
+
     return upscaled_cv
+
+
+def normalize_layout_json(content):
+    """모델이 반환한 텍스트에서 JSON 본문만 안정적으로 추출"""
+    if not content:
+        return content
+
+    text = content.strip()
+
+    # 코드 펜스 제거 (```json ... ``` 형태)
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if lines:
+            lines = lines[1:]
+        while lines and lines[-1].strip().startswith("```"):
+            lines = lines[:-1]
+        text = "\n".join(lines).strip()
+
+    # JSON 시작 위치 탐색 ({ 또는 [ 중 먼저 등장하는 문자 사용)
+    first_obj = text.find('{')
+    first_arr = text.find('[')
+
+    candidates = []
+    if first_obj != -1:
+        candidates.append((first_obj, '{', '}'))
+    if first_arr != -1:
+        candidates.append((first_arr, '[', ']'))
+
+    if not candidates:
+        return text
+
+    candidates.sort(key=lambda item: item[0])
+    start_idx, open_ch, close_ch = candidates[0]
+
+    stack = 0
+    in_string = False
+    escape = False
+
+    for idx in range(start_idx, len(text)):
+        ch = text[idx]
+
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == '\\':
+                escape = True
+            elif ch == '"':
+                in_string = False
+        else:
+            if ch == '"':
+                in_string = True
+            elif ch == open_ch:
+                stack += 1
+            elif ch == close_ch:
+                stack -= 1
+                if stack == 0:
+                    return text[start_idx:idx + 1]
+
+    # 닫히지 않은 경우 가능한 만큼 반환 (추후 json.loads에서 오류 처리)
+    return text[start_idx:]
 
 def extract_layout_only(original_image, timeout=300):
     """
@@ -297,60 +357,87 @@ def extract_layout_only(original_image, timeout=300):
             "max_tokens": 4096,
             "temperature": 0.0
         }, timeout=timeout)
-        
-        if response.status_code != 200:
-            print(f"       ❌ 레이아웃 추출 실패: HTTP {response.status_code}")
-            return None
-            
-        result = response.json()
-        layout_content = result['choices'][0]['message']['content']
-        print(f"       ✅ 레이아웃 추출 완료: {len(layout_content)}자")
-        
-        # JSON 파싱
-        import json
-        layout_data = json.loads(layout_content)
-        
-        # blocks 추출
-        if isinstance(layout_data, dict):
-            blocks = layout_data.get('blocks') or layout_data.get('layout') or layout_data.get('elements', [])
-            if not blocks and len(layout_data) == 1:
-                blocks = list(layout_data.values())[0]
-        else:
-            blocks = layout_data
-            
-        if not blocks:
-            print(f"       ❌ 레이아웃 블록을 찾을 수 없습니다")
-            return None
-        
-        print(f"    📐 {len(blocks)}개 레이아웃 블록 감지 (원본 OCR 포함)")
-        
-        # 레이아웃 + 원본 OCR 텍스트 반환
-        for i, block in enumerate(blocks):
-            category = block.get('category', 'Unknown')
-            bbox = block.get('bbox', [])
-            text = block.get('text', '')
-            
-            if len(bbox) != 4:
-                continue
-            
-            # 원본 OCR 텍스트 저장
-            block['ocr_raw'] = text  # step1에서 추출한 텍스트 = 원본 OCR
-            block['ocr_pending'] = True  # step1b에서 전처리 OCR 추가 필요
-            
-            if category.lower() in ['picture', 'image']:
-                print(f"       [{i+1:03d}] {category:15s} - Picture (원본 크롭 예정)")
-            else:
-                text_preview = text[:30] if text else '(텍스트 없음)'
-                print(f"       [{i+1:03d}] {category:15s} - 원본 OCR: '{text_preview}...'")
-        
-        print(f"    ✅ 레이아웃 + 원본 OCR 완료: {len(blocks)}개 블록")
-        return {"blocks": blocks}
-        
+    except requests.exceptions.Timeout:
+        print(f"       ⏰ 레이아웃 추출 타임아웃 ({timeout}초)")
+        raise
+    except requests.exceptions.ConnectionError as e:
+        print(f"       🔌 레이아웃 추출 연결 오류: {e}")
+        raise
     except Exception as e:
         print(f"       ❌ 레이아웃 추출 오류: {e}")
         import traceback
         traceback.print_exc()
         return None
+
+    if response.status_code != 200:
+        print(f"       ❌ 레이아웃 추출 실패: HTTP {response.status_code}")
+        return None
+
+    try:
+        result = response.json()
+    except ValueError:
+        layout_content_raw = response.text
+        print("       ❌ JSON 응답 파싱 실패 (response.json())")
+        DEBUG_DIR.mkdir(parents=True, exist_ok=True)
+        debug_file = DEBUG_DIR / f"layout_response_error_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+        with open(debug_file, 'w', encoding='utf-8') as f:
+            f.write(layout_content_raw)
+        print(f"       💾 원본 응답 저장: {debug_file}")
+        return None
+
+    layout_content = result['choices'][0]['message']['content']
+    print(f"       ✅ 레이아웃 추출 완료: {len(layout_content)}자")
+
+    cleaned_content = normalize_layout_json(layout_content)
+
+    try:
+        layout_data = json.loads(cleaned_content)
+    except json.JSONDecodeError as e:
+        print(f"       ❌ 레이아웃 JSON 파싱 실패: {e}")
+        DEBUG_DIR.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        raw_file = DEBUG_DIR / f"layout_response_error_{timestamp}.txt"
+        cleaned_file = DEBUG_DIR / f"layout_response_error_{timestamp}.cleaned.json"
+        with open(raw_file, 'w', encoding='utf-8') as f:
+            f.write(layout_content)
+        with open(cleaned_file, 'w', encoding='utf-8') as f:
+            f.write(cleaned_content)
+        print(f"       💾 원본 응답 저장: {raw_file}")
+        print(f"       💾 정제된 응답 저장: {cleaned_file}")
+        return None
+
+    if isinstance(layout_data, dict):
+        blocks = layout_data.get('blocks') or layout_data.get('layout') or layout_data.get('elements', [])
+        if not blocks and len(layout_data) == 1:
+            blocks = list(layout_data.values())[0]
+    else:
+        blocks = layout_data
+
+    if not blocks:
+        print(f"       ❌ 레이아웃 블록을 찾을 수 없습니다")
+        return None
+
+    print(f"    📐 {len(blocks)}개 레이아웃 블록 감지 (원본 OCR 포함)")
+
+    for i, block in enumerate(blocks):
+        category = block.get('category', 'Unknown')
+        bbox = block.get('bbox', [])
+        text = block.get('text', '')
+
+        if len(bbox) != 4:
+            continue
+
+        block['ocr_raw'] = text  # step1에서 추출한 텍스트 = 원본 OCR
+        block['ocr_pending'] = True  # step1b에서 전처리 OCR 추가 필요
+
+        if category.lower() in ['picture', 'image']:
+            print(f"       [{i+1:03d}] {category:15s} - Picture (원본 크롭 예정)")
+        else:
+            text_preview = text[:30] if text else '(텍스트 없음)'
+            print(f"       [{i+1:03d}] {category:15s} - 원본 OCR: '{text_preview}...'")
+
+    print(f"    ✅ 레이아웃 + 원본 OCR 완료: {len(blocks)}개 블록")
+    return {"blocks": blocks}
 
 def ocr_tile_direct(tile_image, timeout=20):
     """타일 이미지를 전처리 없이 직접 OCR (무한재귀 방지)"""
@@ -633,47 +720,50 @@ def merge_two_blocks(block1, block2):
     return merged_block
 
 def ocr_with_dotsocr(image, timeout=300, max_retries=3):
-    """DotsOCR로 레이아웃만 추출 (텍스트 없음, step1b에서 처리)"""
+    """DotsOCR로 레이아웃만 추출 (텍스트 없음, step1b에서 처리)
+
+    타임아웃 발생 시 재시도마다 제한 시간을 늘려가며 요청합니다.
+    """
+
+    if isinstance(timeout, (list, tuple)):
+        timeout_schedule = list(timeout)
+    else:
+        base_timeout = int(timeout)
+        timeout_schedule = [base_timeout]
+        for i in range(1, max_retries):
+            increased = int(base_timeout * (1 + 0.5 * i))
+            timeout_schedule.append(increased)
+
+    retry_delay = 2
+
     for attempt in range(max_retries):
+        current_timeout = timeout_schedule[min(attempt, len(timeout_schedule) - 1)]
+        print(f"    🔄 레이아웃 감지 중... (시도 {attempt + 1}/{max_retries}, 타임아웃 {current_timeout}초)")
+
         try:
-            print(f"    🔄 레이아웃 감지 중... (시도 {attempt + 1}/{max_retries})")
-            
-            # 레이아웃만 추출 (텍스트 없음)
-            result = extract_layout_only(image, timeout=timeout)
+            result = extract_layout_only(image, timeout=current_timeout)
             if result:
-                # 원본 이미지를 반환 (Picture 크롭용)
                 result['original_image'] = image
                 return result
-            else:
-                print(f"    ❌ 레이아웃 추출 실패")
-                if attempt < max_retries - 1:
-                    print(f"    🔄 {2}초 후 재시도...")
-                    time.sleep(2)
-                    continue
-                return None
-                
+
+            print("    ❌ 레이아웃 추출 실패")
         except requests.exceptions.Timeout:
-            print(f"    ⏰ OCR 타임아웃 ({timeout}초)")
-            if attempt < max_retries - 1:
-                print(f"    🔄 {2}초 후 재시도...")
-                time.sleep(2)
-                continue
-            return None
+            print(f"    ⏰ OCR 타임아웃 ({current_timeout}초)")
         except requests.exceptions.ConnectionError:
-            print(f"    🔌 서버 연결 실패")
-            if attempt < max_retries - 1:
-                print(f"    🔄 {2}초 후 재시도...")
-                time.sleep(2)
-                continue
-            return None
+            print("    🔌 서버 연결 실패")
         except Exception as e:
             print(f"    ❌ OCR 실패: {e}")
-            if attempt < max_retries - 1:
-                print(f"    🔄 {2}초 후 재시도...")
-                time.sleep(2)
-                continue
-            return None
-    
+
+        if attempt < max_retries - 1:
+            next_timeout = timeout_schedule[min(attempt + 1, len(timeout_schedule) - 1)]
+            if next_timeout > current_timeout:
+                print(f"    🔄 {retry_delay}초 후 타임아웃을 {next_timeout}초로 늘려 재시도...")
+            else:
+                print(f"    🔄 {retry_delay}초 후 재시도...")
+            time.sleep(retry_delay)
+        else:
+            print("    ❌ 재시도 횟수 초과")
+
     return None
 
 def crop_picture_blocks(image, picture_blocks, doc_name, page_num, bge_model=None, clip_model=None):
