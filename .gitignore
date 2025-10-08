@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# OCR 결과 및 큰 파일들
+ocr_results/
+crops/
+final_outputs/
+layout_combined/
+ocr_refined/
+corrections/
+current_session.json
+*.log
+nohup.out
+
+# PDF 파일
+*.pdf
+
+# 임시 파일
+*.tmp
+*.temp
+.DS_Store
+
+# 모델 weights
+weights/
+*.safetensors
+*.bin
+*.pth
+
+# venv
+venv/
+env/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
