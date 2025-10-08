@@ -8,12 +8,14 @@
 
 import os
 import json
+import re
 import requests
 import base64
 import cv2
 import numpy as np
 import time
 from datetime import datetime
+from difflib import SequenceMatcher
 from pathlib import Path
 from PIL import Image, ImageEnhance, ImageFilter
 
@@ -45,11 +47,50 @@ def normalize_circled_characters(text):
     """원 안의 한글 문자를 원 안의 숫자로 정규화"""
     if not text:
         return text
-    
+
     for hangul, number in CIRCLED_HANGUL_TO_NUMBER.items():
         text = text.replace(hangul, number)
     
     return text
+
+
+def evaluate_ocr_consistency(raw_text, preprocessed_text):
+    """원본 OCR과 전처리 OCR의 유사도를 계산해 불일치 여부 판단"""
+
+    if not raw_text or not preprocessed_text:
+        return {
+            "similarity": 0.0,
+            "overlap": 0.0,
+            "mismatch": False,
+        }
+
+    def normalize(text):
+        # 영문/숫자/한글 중심으로 비교 (특수문자 제거)
+        return re.sub(r"[^0-9A-Za-z가-힣]", "", text)
+
+    raw_norm = normalize(raw_text)
+    pre_norm = normalize(preprocessed_text)
+
+    if not raw_norm or not pre_norm:
+        return {
+            "similarity": 0.0,
+            "overlap": 0.0,
+            "mismatch": False,
+        }
+
+    similarity = SequenceMatcher(None, raw_norm, pre_norm).ratio()
+
+    raw_set = set(raw_norm)
+    pre_set = set(pre_norm)
+    overlap = len(raw_set & pre_set) / max(len(raw_set | pre_set), 1)
+
+    mismatch = similarity < 0.25 and overlap < 0.35 and len(pre_norm) > 6 and len(raw_norm) > 6
+
+    return {
+        "similarity": similarity,
+        "overlap": overlap,
+        "mismatch": mismatch,
+    }
 
 def apply_preprocessing(image):
     """전처리 파이프라인 적용 (텍스트 OCR용)"""
@@ -160,15 +201,42 @@ def process_page(page_data, original_image):
         ocr_raw = normalize_circled_characters(ocr_raw) if ocr_raw else ""
         ocr_preprocessed = normalize_circled_characters(ocr_preprocessed) if ocr_preprocessed else ""
         
+        # 원본/전처리 결과 비교 및 상태 기록
+        status = {
+            "state": "empty" if not ocr_preprocessed else "unknown",
+            "similarity": 0.0,
+            "overlap": 0.0,
+        }
+
+        if ocr_preprocessed:
+            consistency = evaluate_ocr_consistency(ocr_raw, ocr_preprocessed)
+            status.update({
+                "similarity": round(consistency["similarity"], 3),
+                "overlap": round(consistency["overlap"], 3),
+            })
+
+            if consistency["mismatch"] and ocr_raw:
+                status["state"] = "discarded_mismatch"
+                status["discarded_preview"] = (ocr_preprocessed[:40] + '...') if len(ocr_preprocessed) > 40 else ocr_preprocessed
+                print(
+                    f"          ⚠️ 전처리 OCR 불일치 → 폐기 (유사도 {consistency['similarity']:.2f}, 중복비율 {consistency['overlap']:.2f})"
+                )
+                ocr_preprocessed = ""
+            else:
+                status["state"] = "kept"
+        else:
+            status["state"] = "empty"
+
         # 결과 저장
         block['ocr_raw'] = ocr_raw
         block['ocr_preprocessed'] = ocr_preprocessed
+        block['ocr_preprocessed_status'] = status
         block['ocr_pending'] = False
-        
+
         # 미리보기
         raw_preview = (ocr_raw[:30] + '...') if ocr_raw and len(ocr_raw) > 30 else (ocr_raw or "(없음)")
         prep_preview = (ocr_preprocessed[:30] + '...') if ocr_preprocessed and len(ocr_preprocessed) > 30 else (ocr_preprocessed or "(없음)")
-        
+
         print(f"          ✅ 원본: {raw_preview}")
         print(f"          ✅ 전처리: {prep_preview}")
         
